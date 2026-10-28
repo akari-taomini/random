@@ -1,1 +1,1 @@
-{"name":"taomini-preset-variants","version":"1.1.1","type":"module","private":true,"scripts":{"test":"node --test tests/*.test.js","test:ui":"node tests/ui-smoke.mjs"}}
+{"name":"taomini-preset-variants","version":"1.2.0","type":"module","private":true,"scripts":{"test":"node --test tests/*.test.js","test:ui":"node tests/ui-smoke.mjs"}}

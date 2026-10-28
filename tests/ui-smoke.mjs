@@ -11,6 +11,8 @@ const page = await browser.newPage({viewport:{width:1100,height:900},acceptDownl
 const errors=[]; page.on('pageerror',e=>errors.push(e.message));
 await page.goto(`http://127.0.0.1:${server.address().port}/tests/ui-host.html`);
 await page.locator('#tmv-launch').click();
+await page.locator('[data-f="rpm"]').fill('0');
+assert.equal(await page.locator('[data-f="batchSize"]').inputValue(),'5');
 assert.equal(await page.locator('[data-f="provider"]').inputValue(),'st-profile');
 assert.equal(await page.locator('[data-f="profileId"] option').count(),3);
 assert.equal(await page.locator('[data-f="url"]').isVisible(),false);
@@ -25,13 +27,14 @@ await page.locator('[data-f="model"]').fill('test-model');
 let calls=0;
 await page.route('https://api.example.test/**', async route=>{
  const body=route.request().postDataJSON(); calls++;
- if(calls===1){await route.fulfill({status:429,contentType:'application/json',body:'{}'});return;}
+ if(calls===1){await route.fulfill({status:429,contentType:'application/json',headers:{'Retry-After':'0','Access-Control-Expose-Headers':'Retry-After'},body:'{}'});return;}
  const input=JSON.parse(body.messages[1].content);
+ assert.equal(input.units.length,2);
  await route.fulfill({status:200,contentType:'application/json',body:JSON.stringify({choices:[{message:{content:JSON.stringify({units:input.units.map(u=>({id:u.id,status:'ok',variants:Array.from({length:input.variant_count},(_,i)=>`Alternative expression ${i+1} for this particular sentence.`)}))})}}]})});
 });
 await page.locator('[data-a="generate"]').click();
 await page.waitForFunction(()=>document.querySelector('[data-v="status"]').textContent.startsWith('生成完成'));
-assert.equal(calls,3);assert.equal(await page.locator('[data-v="review"] textarea').count(),6);
+assert.equal(calls,2);assert.equal(await page.locator('[data-v="review"] textarea').count(),6);
 const checks=page.locator('[data-v="review"] input[type="checkbox"]');
 assert.equal(await checks.count(),2);assert.equal(await checks.first().isChecked(),false);
 // Bulk adoption validates edited variants and can be undone without deleting them.
@@ -77,8 +80,9 @@ await page.locator('[data-a="current"]').click();
 await page.locator('[data-a="all"]').click();
 await page.locator('[data-a="generate"]').click();
 await page.waitForFunction(()=>document.querySelector('[data-v="status"]').textContent.startsWith('生成完成'));
-assert.equal(await page.evaluate(()=>tmvMock.calls.length),2);
-assert.deepEqual(await page.evaluate(()=>tmvMock.calls.map(c=>c.id)),['api-b','api-b']);
+assert.equal(await page.evaluate(()=>tmvMock.calls.length),1);
+assert.deepEqual(await page.evaluate(()=>tmvMock.calls.map(c=>c.id)),['api-b']);
+assert.equal(await page.evaluate(()=>JSON.parse(tmvMock.calls[0].messages[1].content).units.length),2);
 assert.equal(await page.evaluate(()=>SillyTavern.getContext().extensionSettings.connectionManager.selectedProfile),'api-a');
 assert.equal(await page.evaluate(()=>SillyTavern.getContext().extensionSettings.taomini_preset_variants.profileId),'api-b');
 assert.equal(await page.evaluate(()=>Object.hasOwn(SillyTavern.getContext().extensionSettings.taomini_preset_variants,'key')),false);
@@ -90,16 +94,41 @@ await page.locator('[data-a="current"]').click();
 await page.locator('[data-a="all"]').click();
 await page.locator('[data-a="generate"]').click();
 assert.match(await page.locator('[data-v="status"]').innerText(),/已被删除/);
-assert.equal(await page.evaluate(()=>tmvMock.calls.length),2);
+assert.equal(await page.evaluate(()=>tmvMock.calls.length),1);
 // Native request cancellation leaves the queue usable.
 await page.locator('[data-f="profileId"]').selectOption('api-a');
 await page.evaluate(()=>tmvMock.wait=true);
 await page.locator('[data-a="generate"]').click();
-await page.waitForFunction(()=>tmvMock.calls.length===3);
+await page.waitForFunction(()=>tmvMock.calls.length===2);
 await page.locator('[data-a="stop"]').click();
 await page.waitForFunction(()=>document.querySelector('[data-v="status"]').textContent.startsWith('已停止，'));
 assert.equal(await page.locator('[data-a="generate"]').isEnabled(),true);
 await page.evaluate(()=>tmvMock.wait=false);
+// A failed unit keeps its successful batch sibling, and Retry sends only the failure.
+await page.locator('[data-a="current"]').click();
+await page.locator('[data-a="all"]').click();
+await page.evaluate(()=>tmvMock.failUnit='p0_1');
+await page.locator('[data-a="generate"]').click();
+await page.waitForFunction(()=>document.querySelector('[data-v="status"]').textContent.startsWith('生成完成'));
+assert.match(await page.locator('[data-v="status"]').innerText(),/失败 1 段/);
+assert.equal(await page.locator('[data-v="review"] textarea').count(),3);
+assert.equal(await page.evaluate(()=>tmvMock.calls.length),3);
+await page.evaluate(()=>delete tmvMock.failUnit);
+await page.locator('[data-a="retry"]').click();
+await page.waitForFunction(()=>document.querySelector('[data-v="status"]').textContent.startsWith('生成完成'));
+assert.equal(await page.evaluate(()=>tmvMock.calls.length),4);
+assert.deepEqual(await page.evaluate(()=>JSON.parse(tmvMock.calls.at(-1).messages[1].content).units.map(u=>u.id)),['p0_1']);
+assert.equal(await page.locator('[data-v="review"] textarea').count(),6);
+// A new run respects RPM spacing; cancelling its wait sends no extra request.
+await page.locator('[data-f="rpm"]').fill('1');
+await page.locator('[data-a="current"]').click();
+await page.locator('[data-a="all"]').click();
+await page.locator('[data-a="generate"]').click();
+await page.waitForFunction(()=>document.querySelector('[data-v="status"]').textContent.startsWith('等待 '));
+await page.locator('[data-a="stop"]').click();
+await page.waitForFunction(()=>document.querySelector('[data-v="status"]').textContent.startsWith('已停止，'));
+assert.equal(await page.evaluate(()=>tmvMock.calls.length),4);
+await page.locator('[data-f="rpm"]').fill('0');
 await page.setViewportSize({width:390,height:844});
 assert.equal(await page.evaluate(()=>document.querySelector('.tmv-dialog').scrollWidth > 390),false);
 await page.locator('.tmv-scroll').evaluate(e=>e.scrollTop=0);

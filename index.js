@@ -1,8 +1,10 @@
 import { DEFAULT_PROMPT, parsePreset, planText, generate, listModels, exportPreset, renderPlan, validateVariants, endpoint } from './core.js';
 import { getProfiles, requireProfile, generateWithProfile } from './st-api.js';
+import { makeBatches, RequestPacer } from './batch.js';
 
 const MODULE = 'taomini_preset_variants';
-const defaults = { provider: 'st-profile', profileId: '', url: '', model: '', count: 3, includeOriginal: true, prompt: DEFAULT_PROMPT };
+const defaults = { provider: 'st-profile', profileId: '', url: '', model: '', count: 3, batchSize: 5, rpm: 10, includeOriginal: true, prompt: DEFAULT_PROMPT };
+const pacer = new RequestPacer();
 const ctx = () => globalThis.SillyTavern?.getContext?.();
 let preset, presetName = '', plans = new Map(), selected = new Set(), busy = false, controller;
 let activeIndex = -1;
@@ -22,6 +24,9 @@ panel.innerHTML = `
   <div class="tmv-grid">
    <label>改写来源<select data-f="provider"><option value="st-profile">酒馆 API 连接预设</option><option value="openai">单独填写 · OpenAI 兼容</option><option value="gemini">单独填写 · Gemini 原生</option></select></label>
    <label>新增变体数（不含原文）<input data-f="count" type="number" min="1" max="8" value="3"></label>
+   <label>每批合并段落数<input data-f="batchSize" type="number" min="1" max="50" value="5"></label>
+   <label>请求 RPM 上限（0 表示不限）<input data-f="rpm" type="number" min="0" max="600" value="10"></label>
+   <p class="tmv-note tmv-wide">默认每批最多 5 段、每分钟最多 10 次生成请求。较长段落会自动减少同批数量；重试也计入请求间隔。这里的限速仅控制本工坊，其他聊天请求仍占用接口额度。</p>
    <div class="tmv-wide" data-mode="profile"><label>酒馆 API 连接预设<div class="tmv-row"><select data-f="profileId"><option value="">请选择连接预设</option></select><button type="button" data-a="profiles">刷新列表</button></div></label><p data-v="profile-info" class="tmv-note"></p></div>
    <label class="tmv-wide" data-mode="direct">API 基础地址<input data-f="url" type="url" placeholder="https://你的接口/v1" autocomplete="off"></label>
    <label class="tmv-wide" data-mode="direct">API Key<input data-f="key" type="password" placeholder="仅在本次页面内使用，刷新后清空" autocomplete="off"></label>
@@ -52,7 +57,7 @@ panel.innerHTML = `
   <div class="tmv-row tmv-wrap"><button type="button" data-a="export" class="tmv-primary">导出已审核预设</button><button type="button" data-a="draft">保存审核草稿</button><button type="button" data-a="load-draft">恢复草稿</button><input type="file" data-f="draftfile" accept=".json,application/json" hidden></div>
   <p class="tmv-note">导出为新 JSON；到酒馆预设面板导入即可。草稿包含原预设和生成进度，方便下次接着审核。</p>
  </section>
- <footer class="tmv-note">桃mini & GPT · v1.1.1 · 欢迎标注作者后二改与分享，非商业使用。</footer>
+ <footer class="tmv-note">桃mini & GPT · v1.2.0 · 欢迎标注作者后二改与分享，非商业使用。</footer>
  </div>`;
 
 const q = s => panel.querySelector(s);
@@ -68,7 +73,10 @@ function config() {
     const count = Number(f('count').value);
     if (!Number.isInteger(count) || count < 1 || count > 8) throw new Error('新增变体数应为 1～8 的整数。');
     if (!f('includeOriginal').checked && count < 2) throw new Error('不包含原文时，至少需要两个新增变体。');
-    return { provider: f('provider').value, profileId: f('profileId').value, url: f('url').value.trim(), model: f('model').value.trim(), key: f('key').value.trim(), count, includeOriginal: f('includeOriginal').checked, prompt: f('prompt').value };
+    const batchSize = Number(f('batchSize').value), rpm = Number(f('rpm').value);
+    if (!Number.isInteger(batchSize) || batchSize < 1 || batchSize > 50) throw new Error('每批段落数应为 1～50 的整数。');
+    if (!f('rpm').value.trim() || !Number.isInteger(rpm) || rpm < 0 || rpm > 600) throw new Error('RPM 上限应为 0～600 的整数，0 表示不限。');
+    return { provider: f('provider').value, profileId: f('profileId').value, url: f('url').value.trim(), model: f('model').value.trim(), key: f('key').value.trim(), count, batchSize, rpm, includeOriginal: f('includeOriginal').checked, prompt: f('prompt').value };
 }
 
 let profiles = [];
@@ -164,6 +172,11 @@ function renderEntries() {
 function renderSelection() {
     const count = [...selected].reduce((n, i) => n + ensurePlan(i).filter(p => p.id).length, 0);
     v('selection').textContent = `已选择 ${selected.size} 项 · ${count} 个可改写段落`;
+    try {
+        const pending = [...selected].flatMap(index => ensurePlan(index).filter(part => part.id && !part.variants.length).map(part => ({ part, index })));
+        const batches = makeBatches(pending, Number(f('batchSize').value), Number(f('count').value));
+        v('selection').textContent += ` · 待生成 ${pending.length} 段，预计 ${batches.length} 次请求（不含重试）`;
+    } catch { /* Keep the existing count while a numeric field is being edited. */ }
     const previous = f('preview').value;
     f('preview').replaceChildren();
     for (const i of [...new Set([...selected, ...[...plans].filter(([, parts]) => parts.some(p => p.variants?.length || p.error)).map(([i]) => i)])]) {
@@ -230,53 +243,59 @@ async function readFile(file) {
     try { return JSON.parse(await file.text()); } catch { throw new Error('文件不是合法 JSON。'); }
 }
 
-const wait = (ms, signal) => new Promise((resolve, reject) => {
-    if (signal.aborted) { reject(signal.reason); return; }
-    const abort = () => { clearTimeout(timer); reject(signal.reason); };
-    const timer = setTimeout(() => { signal.removeEventListener('abort', abort); resolve(); }, ms);
-    signal.addEventListener('abort', abort, { once: true });
-});
-
 async function run(jobs) {
     if (busy) return;
     let conf;
     try {
-        conf = config();
+        conf = { ...config(), partialResults: true };
         if (conf.provider === 'st-profile') conf.sourceLabel = requireProfile(ctx(), conf.profileId).name;
         else { if (!conf.url || !conf.model) throw new Error('先填写 API 地址和模型。'); endpoint(conf); }
         saveSettings();
     }
     catch (error) { status(error.message, true); return; }
     if (!jobs.length) { status('没有待处理的段落。'); return; }
+    const batches = makeBatches(jobs, conf.batchSize, conf.count);
     // Config is captured once: changing UI cannot alter a running job.
     controller = new AbortController(); setBusy(true);
     let done = 0, failed = 0, attempts = 0;
     v('progress').max = jobs.length; v('progress').value = 0;
     try {
-        for (const { part, index } of jobs) {
+        for (const [batchIndex, batch] of batches.entries()) {
             if (controller.signal.aborted) break;
-            status(`正在生成 ${done + 1}/${jobs.length} · ${preset.prompts[index].name ?? '条目'}${conf.sourceLabel ? ' · 连接：' + conf.sourceLabel : ''} · 每段最多请求两次`);
-            part.approved = false;
+            const label = `批次 ${batchIndex + 1}/${batches.length} · 本批 ${batch.length} 段 · 已处理 ${done}/${jobs.length} 段${conf.sourceLabel ? ' · 连接：' + conf.sourceLabel : ''}`;
             let result;
             for (let attempt = 0; attempt < 2; attempt++) {
                 try {
+                    await pacer.beforeRequest(conf.rpm, controller.signal, remaining => {
+                        status(`等待 ${Math.ceil(remaining / 1000)} 秒后发送 · ${label} · RPM 上限 ${conf.rpm || '不限'}`);
+                    });
+                    status(`正在生成 · ${label}${attempt ? ' · 重试' : ''}`);
+                    for (const { part } of batch) part.approved = false;
                     attempts++;
-                    const units = [{ id: part.id, text: part.original }];
+                    const units = batch.map(({ part }) => ({ id: part.id, text: part.original }));
                     result = conf.provider === 'st-profile'
                         ? await generateWithProfile(conf, units, conf.count, controller.signal, ctx())
                         : await generate(conf, units, conf.count, controller.signal);
                     break;
                 } catch (error) {
                     if (controller.signal.aborted) throw error;
-                    if (attempt === 0 && error.retryable) { await wait(1800, controller.signal); continue; }
-                    part.error = error.message; failed++;
+                    if (error.retryable) pacer.defer(error.rateLimited ? Math.max(1000, error.retryAfterMs ?? 60000) : 1800);
+                    if (attempt === 0 && error.retryable) continue;
+                    for (const { part } of batch) part.error = error.message;
+                    failed += batch.length;
                     if (error.fatal) throw error;
                     break;
                 }
             }
-            if (result) { part.variants = result[0].variants; part.error = ''; }
-            done++; v('progress').value = done;
-            if (index === activeIndex) renderReview();
+            if (result) {
+                for (const { part } of batch) {
+                    const outcome = result.find(r => r.id === part.id);
+                    if (outcome?.variants) { part.variants = outcome.variants; part.error = ''; }
+                    else { part.error = outcome?.error || 'API 未返回该段结果。'; failed++; }
+                }
+            }
+            done += batch.length; v('progress').value = done;
+            if (batch.some(job => job.index === activeIndex)) renderReview();
         }
         status(`${controller.signal.aborted ? '已停止' : '生成完成'}：处理 ${done}/${jobs.length} 段，失败 ${failed} 段，共请求 ${attempts} 次。请审核后采用。`);
     } catch (error) { status(controller.signal.aborted ? `已停止，保留已完成的结果（${done} 段）。` : error.message, !controller.signal.aborted); }
@@ -368,6 +387,7 @@ f('provider').addEventListener('change', () => {
     else status('已切换接口格式，请填写对应地址、密钥和模型。');
 });
 f('profileId').addEventListener('change', showProfileInfo);
+for (const name of ['batchSize', 'count']) f(name).addEventListener('input', renderSelection);
 f('url').addEventListener('change', () => { q('#tmv-models').replaceChildren(); });
 for (const key of Object.keys(defaults)) f(key).addEventListener('change', () => { try { saveSettings(); } catch (e) { status(e.message, true); } });
 f('file').addEventListener('change', async () => {

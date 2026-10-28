@@ -1,4 +1,4 @@
-import { DEFAULT_PROMPT, parseReply } from './core.js';
+import { DEFAULT_PROMPT, parseReply, parseBatchReply } from './core.js';
 
 const fatal = message => Object.assign(new Error(message), { fatal: true });
 
@@ -42,7 +42,7 @@ function requestError(error) {
     }
     const detail = messages.join(' ');
     if (/\b(?:401|403)\b/.test(detail)) return fatal('酒馆连接鉴权失败，请在该连接预设中检查密钥和访问权限。');
-    if (/\b(?:429|5\d\d)\b/.test(detail)) return Object.assign(new Error('酒馆连接限流或服务暂时不可用，将按队列规则重试。'), { retryable: true });
+    if (/\b(?:429|5\d\d)\b/.test(detail)) return Object.assign(new Error('酒馆连接限流或服务暂时不可用，将按队列规则重试。'), { retryable: true, rateLimited: /\b429\b/.test(detail) });
     return fatal('酒馆连接请求失败，请检查该连接预设的 API、模型、密钥及网络；生成队列已停止。');
 }
 
@@ -74,5 +74,5 @@ export async function generateWithProfile(config, units, count, signal, context)
     }
     const text = typeof response === 'string' ? response : response?.content;
     if (typeof text !== 'string' || !text.trim()) throw new Error('酒馆连接没有返回文本，可能被拦截或输出为空。');
-    return parseReply(text, units, count);
+    return (config.partialResults ? parseBatchReply : parseReply)(text, units, count);
 }

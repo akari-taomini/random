@@ -111,6 +111,27 @@ export function parseReply(text, units, count) {
     });
 }
 
+// Batch results are matched by ID, never by response order. A bad/missing unit
+// does not discard successful siblings or cause an automatic request fan-out.
+export function parseBatchReply(text, units, count) {
+    let raw = String(text).trim();
+    if (raw.startsWith('```')) raw = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
+    let result;
+    try { result = JSON.parse(raw); } catch { throw new Error('API 未返回合法 JSON，本批原文已保留。'); }
+    if (!Array.isArray(result?.units)) throw new Error('API 未返回 units 数组，本批原文已保留。');
+    const ids = new Set(units.map(u => u.id));
+    if (result.units.some(r => !r || !ids.has(r.id))) throw new Error('返回了本批未请求的 id，本批原文已保留。');
+    return units.map(unit => {
+        try {
+            const matches = result.units.filter(r => r.id === unit.id);
+            if (matches.length !== 1) throw new Error(matches.length ? '该段返回 id 重复。' : 'API 未返回该段结果。');
+            const r = matches[0];
+            if (r.status !== 'ok') throw new Error(typeof r.reason === 'string' && r.reason ? r.reason.slice(0, 200) : '该段需要人工处理。');
+            return { id: unit.id, variants: validateVariants(unit.text, r.variants, count) };
+        } catch (error) { return { id: unit.id, error: error.message }; }
+    });
+}
+
 export function renderPlan(parts, includeOriginal = true) {
     return parts.map(p => {
         if (!p.id || !p.approved || !p.variants.length) return p.raw;
@@ -163,6 +184,13 @@ export async function request(config, payload, { signal, models = false, fetchIm
             const err = new Error(`API 返回 HTTP ${response.status}。请检查地址、模型、密钥或额度。`);
             err.retryable = response.status === 429 || response.status >= 500;
             err.fatal = response.status >= 400 && response.status < 500 && response.status !== 429;
+            err.rateLimited = response.status === 429;
+            const retryAfter = response.headers?.get?.('Retry-After');
+            if (retryAfter !== null && retryAfter !== undefined) {
+                const seconds = Number(retryAfter);
+                const delay = /^\s*\d+(?:\.\d+)?\s*$/.test(retryAfter) ? seconds * 1000 : Date.parse(retryAfter) - Date.now();
+                if (Number.isFinite(delay)) err.retryAfterMs = Math.max(0, delay);
+            }
             throw err;
         }
         return await response.json();
@@ -189,7 +217,7 @@ export async function generate(config, units, count, signal, fetchImpl = fetch) 
         ? result.candidates?.[0]?.content?.parts?.filter(p => !p.thought && typeof p.text === 'string').map(p => p.text).join('')
         : result.choices?.[0]?.message?.content;
     if (typeof text !== 'string' || !text.trim()) throw new Error('API 没有返回文本，可能被拦截或输出为空。');
-    return parseReply(text, units, count);
+    return (config.partialResults ? parseBatchReply : parseReply)(text, units, count);
 }
 
 export async function listModels(config, signal, fetchImpl = fetch) {
