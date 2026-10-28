@@ -1,6 +1,7 @@
 import { DEFAULT_PROMPT, parsePreset, planText, generate, listModels, exportPreset, renderPlan, validateVariants, endpoint } from './core.js';
 import { getProfiles, requireProfile, generateWithProfile } from './st-api.js';
 import { makeBatches, RequestPacer } from './batch.js';
+import { readCurrentChatPreset } from './preset-reader.js';
 
 const MODULE = 'taomini_preset_variants';
 const defaults = { provider: 'st-profile', profileId: '', url: '', model: '', count: 3, batchSize: 5, rpm: 10, includeOriginal: true, prompt: DEFAULT_PROMPT };
@@ -37,7 +38,7 @@ panel.innerHTML = `
   <details><summary>内置改写提示词 · 可编辑</summary><textarea data-f="prompt" rows="10" spellcheck="false"></textarea><button type="button" data-a="reset-prompt">恢复默认提示词</button></details>
  </details>
  <section class="tmv-card"><h3>② 选择预设条目</h3>
-  <div class="tmv-row tmv-wrap"><button type="button" data-a="current">读取当前预设</button><button type="button" data-a="upload">上传预设 JSON</button><input type="file" data-f="file" accept=".json,application/json" hidden></div>
+  <div class="tmv-row tmv-wrap"><button type="button" data-a="current">读取当前对话补全预设</button><button type="button" data-a="upload">上传预设 JSON</button><input type="file" data-f="file" accept=".json,application/json" hidden></div>
   <p data-v="source" class="tmv-note">还没有读取预设。</p>
   <div class="tmv-row"><input data-f="search" placeholder="搜索条目名称" aria-label="搜索条目名称"><button type="button" data-a="all">选择可见</button><button type="button" data-a="none">清空选择</button></div>
   <div data-v="entries" class="tmv-entries"></div>
@@ -57,7 +58,7 @@ panel.innerHTML = `
   <div class="tmv-row tmv-wrap"><button type="button" data-a="export" class="tmv-primary">导出已审核预设</button><button type="button" data-a="draft">保存审核草稿</button><button type="button" data-a="load-draft">恢复草稿</button><input type="file" data-f="draftfile" accept=".json,application/json" hidden></div>
   <p class="tmv-note">导出为新 JSON；到酒馆预设面板导入即可。草稿包含原预设和生成进度，方便下次接着审核。</p>
  </section>
- <footer class="tmv-note">桃mini & GPT · v1.2.0 · 欢迎标注作者后二改与分享，非商业使用。</footer>
+ <footer class="tmv-note">桃mini & GPT · v1.2.1 · 欢迎标注作者后二改与分享，非商业使用。</footer>
  </div>`;
 
 const q = s => panel.querySelector(s);
@@ -324,11 +325,16 @@ const handlers = {
     },
     profiles() { refreshProfiles(); },
     close() { panel.closest('dialog')?.close(); },
-    current() {
-        const manager = ctx()?.getPresetManager?.('openai');
-        if (!manager?.getPresetSettings) throw new Error('此版本无法读取当前预设，请使用“上传预设 JSON”。');
-        const name = manager.getSelectedPresetName();
-        load(manager.getPresetSettings(name), name || '当前预设');
+    async current() {
+        if (busy) return;
+        setBusy(true); a('stop').disabled = true;
+        status('正在读取当前对话补全预设…');
+        try {
+            const result = await readCurrentChatPreset({ context: ctx() });
+            load(result.preset, result.name);
+            v('source').textContent += result.source === 'live' ? ' · 当前界面状态（含未保存修改）' : ' · 已保存版本';
+            status(result.source === 'live' ? '已读取当前对话补全预设，请勾选需要改写的条目。' : '已读取保存的预设版本；当前界面状态不可用，请确认修改已保存。');
+        } finally { setBusy(false); renderEntries(); }
     },
     upload() { f('file').click(); },
     all() { v('entries').querySelectorAll('[data-index]').forEach(row => { if (!row.querySelector('input').disabled) selected.add(Number(row.dataset.index)); }); renderEntries(); },
@@ -436,7 +442,7 @@ function init() {
     launch.addEventListener('click', () => { if (!busy) { refreshProfiles(); showApiMode(); } dialog.showModal(); });
     refreshProfiles(); showApiMode();
     // Escape hides the panel; an explicit Stop button controls ongoing requests.
-    dialog.addEventListener('close', () => { if (busy) globalThis.toastr?.info?.('工坊已收起，生成仍在继续；重新打开可查看或停止。'); });
+    dialog.addEventListener('close', () => { if (busy) globalThis.toastr?.info?.('工坊已收起，当前操作仍在继续；重新打开可查看。'); });
 }
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init, { once: true });
 else init();

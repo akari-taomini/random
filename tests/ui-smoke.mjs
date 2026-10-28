@@ -19,7 +19,14 @@ assert.equal(await page.locator('[data-f="url"]').isVisible(),false);
 await page.locator('[data-f="provider"]').selectOption('openai');
 await page.locator('[data-a="current"]').click();
 assert.match(await page.locator('[data-v="source"]').innerText(),/2 个条目/);
+assert.match(await page.locator('[data-v="source"]').innerText(),/含未保存修改/);
+await page.evaluate(()=>{
+ tmvMock.currentSettings.prompts[0].content=tmvMock.currentSettings.prompts[0].content.replace('Keep the meaning of every original sentence.','Keep the meaning of every original sentence, including unsaved changes.');
+ tmvMock.currentSettings.temp_openai=0.7;
+});
+await page.locator('[data-a="current"]').click();
 await page.locator('[data-a="all"]').click();
+assert.match(await page.locator('[data-v="review"] .tmv-original').first().innerText(),/including unsaved changes/);
 assert.match(await page.locator('[data-v="selection"]').innerText(),/2 个可改写段落/);
 await page.locator('[data-f="url"]').fill('https://api.example.test/v1');
 await page.locator('[data-f="key"]').fill('test-key');
@@ -66,6 +73,9 @@ assert.ok(exported.prompts[0].content.includes('Maintain the tone and style of t
 assert.ok(exported.prompts[0].content.includes('{{random::Existing one::Existing two}}'));
 assert.ok(!Object.hasOwn(exported.prompts[1],'content'));
 assert.ok(!JSON.stringify(exported).includes('test-key'));
+assert.equal(exported.temperature,0.7);
+assert.equal(exported.extensions.grouping.name,'独立自我');
+assert.ok(!JSON.stringify(exported).includes('never-export'));
 const pendingDraft=page.waitForEvent('download');await page.locator('[data-a="draft"]').click();const draftDownload=await pendingDraft;
 const draft=JSON.parse(await readFile(await draftDownload.path(),'utf8'));assert.ok(!JSON.stringify(draft).includes('test-key'));
 await page.locator('[data-a="current"]').click();
@@ -140,6 +150,7 @@ await page.waitForFunction(()=>document.querySelector('[data-v="source"]').textC
 assert.equal(await page.locator('[data-v="entries"] .tmv-entry').count(),265);
 }
 assert.deepEqual(errors,[]);
+assert.equal(await page.evaluate(()=>tmvMock.wrongGetterCalls),0);
 console.log('UI smoke passed: retry, preview, edit/approval, export, draft restore, mobile layout; no page errors.');
 await browser.close();
 server.close();

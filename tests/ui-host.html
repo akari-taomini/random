@@ -1,5 +1,25 @@
 <!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>工坊测试宿主</title><link rel="stylesheet" href="../style.css"><body style="background:#eee;padding:20px"><div id="extensions_settings2"></div><script>
-window.tmvMock={calls:[],fail:false,wait:false,profiles:[{id:'api-a',name:'聊天连接',api:'custom',model:'model-a'},{id:'api-b',name:'改写连接',api:'makersuite',model:'model-b'}]};
+const savedPreset={temperature:1.2,prompts:[{identifier:'main',name:'主规则',content:'# 保留标题\nKeep the meaning of every original sentence.\nMaintain the tone and style of the original text.\n{{random::Existing one::Existing two}}\n<closing_tag>'},{identifier:'chatHistory',marker:true}],prompt_order:[{character_id:100001,order:[{identifier:'main',enabled:true}]}],extensions:{grouping:{name:'独立自我'}}};
+const currentSettings={...structuredClone(savedPreset),preset_settings_openai:'测试预设',temp_openai:1.2,custom_url:'https://private-url.test',proxy_password:'never-export'};
+window.tmvMock={calls:[],fail:false,wait:false,wrongGetterCalls:0,currentSettings,profiles:[{id:'api-a',name:'聊天连接',api:'custom',model:'model-a'},{id:'api-b',name:'改写连接',api:'makersuite',model:'model-b'}]};
 const extensionSettings={disabledExtensions:[],connectionManager:{selectedProfile:'api-a'}};
-window.SillyTavern={getContext:()=>({extensionSettings,saveSettingsDebounced(){},ConnectionManagerRequestService:{getSupportedProfiles(){return window.tmvMock.profiles;},async sendRequest(id,messages,maxTokens,options){window.tmvMock.calls.push({id,messages,maxTokens});if(window.tmvMock.wait)return new Promise((resolve,reject)=>options.signal.addEventListener('abort',()=>reject(options.signal.reason)));if(window.tmvMock.fail)throw new Error('API request failed');const input=JSON.parse(messages[1].content);return {content:JSON.stringify({units:input.units.map(u=>u.id===window.tmvMock.failUnit?{id:u.id,status:'needs_review',reason:'Simulated unit failure'}:({id:u.id,status:'ok',variants:Array.from({length:input.variant_count},(_,i)=>`Alternative saved-profile expression ${i+1} for this sentence.`)}))})};}},getPresetManager:()=>({getSelectedPresetName:()=> '测试预设',getPresetSettings:()=>({temperature:1.2,prompts:[{identifier:'main',name:'主规则',content:'# 保留标题\nKeep the meaning of every original sentence.\nMaintain the tone and style of the original text.\n{{random::Existing one::Existing two}}\n<closing_tag>'},{identifier:'chatHistory',marker:true}],prompt_order:[{character_id:100001,order:[{identifier:'main',enabled:true}]}]})})})};
+const profileService={
+ getSupportedProfiles(){return window.tmvMock.profiles;},
+ async sendRequest(id,messages,maxTokens,options){
+  window.tmvMock.calls.push({id,messages,maxTokens});
+  if(window.tmvMock.wait)return new Promise((resolve,reject)=>options.signal.addEventListener('abort',()=>reject(options.signal.reason)));
+  if(window.tmvMock.fail)throw new Error('API request failed');
+  const input=JSON.parse(messages[1].content);
+  return {content:JSON.stringify({units:input.units.map(u=>u.id===window.tmvMock.failUnit?{id:u.id,status:'needs_review',reason:'Simulated unit failure'}:({id:u.id,status:'ok',variants:Array.from({length:input.variant_count},(_,i)=>`Alternative saved-profile expression ${i+1} for this sentence.`)}))})};
+ }
+};
+window.SillyTavern={getContext:()=>({
+ extensionSettings,chatCompletionSettings:currentSettings,saveSettingsDebounced(){},ConnectionManagerRequestService:profileService,
+ getPresetManager:()=>({
+  getSelectedPresetName:()=>currentSettings.preset_settings_openai,
+  getPresetSettings(){window.tmvMock.wrongGetterCalls++;return {};},
+  getCompletionPresetByName:()=>savedPreset,
+  getPresetList:()=>({presets:[savedPreset],preset_names:{'测试预设':0},settings:currentSettings})
+ })
+})};
 </script><script type="module" src="../index.js"></script></body></html>
