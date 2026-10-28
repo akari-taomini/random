@@ -1,0 +1,65 @@
+import { fileURLToPath } from 'node:url';
+import { resolve } from 'node:path';
+const { chromium } = await import(process.env.PLAYWRIGHT_MODULE_PATH || 'playwright');
+const root = fileURLToPath(new URL('..', import.meta.url));
+import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
+const {createServer}=await import('node:http');
+const server=createServer(async(req,res)=>{try{const path=resolve(root, '.' + new URL(req.url,'http://local').pathname); const data=await readFile(path);res.setHeader('Content-Type',path.endsWith('.js')?'text/javascript':path.endsWith('.css')?'text/css':'text/html');res.end(data);}catch{res.statusCode=404;res.end();}});await new Promise(r=>server.listen(0,'127.0.0.1',r));
+const browser = await chromium.launch({headless:true,...(process.env.BROWSER_EXECUTABLE_PATH ? { executablePath: process.env.BROWSER_EXECUTABLE_PATH } : {}),args:['--no-sandbox','--disable-dev-shm-usage','--disable-gpu','--disable-software-rasterizer','--no-zygote','--single-process']});
+const page = await browser.newPage({viewport:{width:1100,height:900},acceptDownloads:true});
+const errors=[]; page.on('pageerror',e=>errors.push(e.message));
+await page.goto(`http://127.0.0.1:${server.address().port}/tests/ui-host.html`);
+await page.locator('#tmv-launch').click();
+await page.locator('[data-a="current"]').click();
+assert.match(await page.locator('[data-v="source"]').innerText(),/2 个条目/);
+await page.locator('[data-a="all"]').click();
+assert.match(await page.locator('[data-v="selection"]').innerText(),/2 个可改写段落/);
+await page.locator('[data-f="url"]').fill('https://api.example.test/v1');
+await page.locator('[data-f="key"]').fill('test-key');
+await page.locator('[data-f="model"]').fill('test-model');
+let calls=0;
+await page.route('https://api.example.test/**', async route=>{
+ const body=route.request().postDataJSON(); calls++;
+ if(calls===1){await route.fulfill({status:429,contentType:'application/json',body:'{}'});return;}
+ const input=JSON.parse(body.messages[1].content);
+ await route.fulfill({status:200,contentType:'application/json',body:JSON.stringify({choices:[{message:{content:JSON.stringify({units:input.units.map(u=>({id:u.id,status:'ok',variants:Array.from({length:input.variant_count},(_,i)=>`Alternative expression ${i+1} for this particular sentence.`)}))})}}]})});
+});
+await page.locator('[data-a="generate"]').click();
+await page.waitForFunction(()=>document.querySelector('[data-v="status"]').textContent.startsWith('生成完成'));
+assert.equal(calls,3);assert.equal(await page.locator('[data-v="review"] textarea').count(),6);
+const checks=page.locator('[data-v="review"] input[type="checkbox"]');
+assert.equal(await checks.count(),2);assert.equal(await checks.first().isChecked(),false);
+await checks.first().check();
+// Editing invalidates approval.
+const edit=page.locator('[data-v="review"] textarea').first();
+await edit.fill('A rewritten sentence that retains its original meaning.');
+assert.equal(await checks.first().isChecked(),false);
+await checks.first().check();
+const pending=page.waitForEvent('download');await page.locator('[data-a="export"]').click();const download=await pending;
+const exported=JSON.parse(await readFile(await download.path(),'utf8'));
+assert.ok(exported.prompts[0].content.includes('{{random::Keep the meaning'));
+assert.ok(exported.prompts[0].content.includes('Maintain the tone and style of the original text.'));
+assert.ok(exported.prompts[0].content.includes('{{random::Existing one::Existing two}}'));
+assert.ok(!Object.hasOwn(exported.prompts[1],'content'));
+assert.ok(!JSON.stringify(exported).includes('test-key'));
+const pendingDraft=page.waitForEvent('download');await page.locator('[data-a="draft"]').click();const draftDownload=await pendingDraft;
+const draft=JSON.parse(await readFile(await draftDownload.path(),'utf8'));assert.ok(!JSON.stringify(draft).includes('test-key'));
+await page.locator('[data-a="current"]').click();
+await page.locator('[data-f="draftfile"]').setInputFiles({name:'draft.json',mimeType:'application/json',buffer:Buffer.from(JSON.stringify(draft))});
+await page.waitForFunction(()=>document.querySelector('[data-v="status"]').textContent.includes('草稿已恢复'));
+assert.equal(await page.locator('[data-v="review"] input[type="checkbox"]').first().isChecked(),true);
+await page.setViewportSize({width:390,height:844});
+assert.equal(await page.evaluate(()=>document.querySelector('.tmv-dialog').scrollWidth > 390),false);
+await page.locator('.tmv-scroll').evaluate(e=>e.scrollTop=0);
+
+// Real uploaded preset is read by UI and keeps all entries.
+if (process.env.PRESET_FIXTURE) {
+await page.locator('[data-f="file"]').setInputFiles(process.env.PRESET_FIXTURE);
+await page.waitForFunction(()=>document.querySelector('[data-v="source"]').textContent.includes('265 个条目'));
+assert.equal(await page.locator('[data-v="entries"] .tmv-entry').count(),265);
+}
+assert.deepEqual(errors,[]);
+console.log('UI smoke passed: retry, preview, edit/approval, export, draft restore, mobile layout; no page errors.');
+await browser.close();
+server.close();

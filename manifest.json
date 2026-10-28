@@ -1,0 +1,11 @@
+{
+  "display_name": "桃mini · 同义随机宏工坊",
+  "loading_order": 100,
+  "requires": [],
+  "optional": [],
+  "js": "index.js",
+  "css": "style.css",
+  "author": "桃mini & GPT",
+  "version": "1.0.0",
+  "homePage": "https://github.com/akari-taomini/random"
+}
