@@ -43,7 +43,8 @@ panel.innerHTML = `
   <p data-v="status" class="tmv-status" role="status" aria-live="polite">等待开始。已有宏、代码、标签行会保留原文。</p>
   <progress data-v="progress" max="1" value="0"></progress>
   <div class="tmv-row"><label class="tmv-grow">预览条目<select data-f="preview"></select></label></div>
-  <p class="tmv-note">结构校验不能保证句意等价，请阅读变体后勾选“采用此段”。未采用或失败的段落保留原文。</p>
+  <div class="tmv-row tmv-wrap"><button type="button" data-a="approve-all">一键采用全部已生成段落</button><button type="button" data-a="unapprove-all">取消全部采用</button></div>
+  <p class="tmv-note">可以逐段勾选“采用此段”，也可一键采用当前工作区全部已生成且校验通过的段落（跨条目）。失败或未采用的段落保留原文。</p>
   <div data-v="review"></div>
  </section>
  <section class="tmv-card"><h3>④ 导出新预设</h3>
@@ -51,7 +52,7 @@ panel.innerHTML = `
   <div class="tmv-row tmv-wrap"><button type="button" data-a="export" class="tmv-primary">导出已审核预设</button><button type="button" data-a="draft">保存审核草稿</button><button type="button" data-a="load-draft">恢复草稿</button><input type="file" data-f="draftfile" accept=".json,application/json" hidden></div>
   <p class="tmv-note">导出为新 JSON；到酒馆预设面板导入即可。草稿包含原预设和生成进度，方便下次接着审核。</p>
  </section>
- <footer class="tmv-note">桃mini & GPT · v1.1.0 · 欢迎标注作者后二改与分享，非商业使用。</footer>
+ <footer class="tmv-note">桃mini & GPT · v1.1.1 · 欢迎标注作者后二改与分享，非商业使用。</footer>
  </div>`;
 
 const q = s => panel.querySelector(s);
@@ -283,6 +284,25 @@ async function run(jobs) {
 }
 
 const handlers = {
+    'approve-all'() {
+        if (!preset) throw new Error('请先读取预设并生成变体。');
+        let adopted = 0, invalid = 0;
+        for (const parts of plans.values()) for (const part of parts) {
+            if (!part.id) continue;
+            part.approved = false;
+            if (!part.variants.length || part.error) continue;
+            try {
+                validateVariants(part.original, part.variants, part.variants.length);
+                part.approved = true; adopted++;
+            } catch (error) { part.error = error.message; invalid++; }
+        }
+        renderReview();
+        status(`已采用 ${adopted} 个已生成段落${invalid ? `，${invalid} 段校验未通过` : ''}。失败或未生成的段落保留原文；现在可以导出预设。`);
+    },
+    'unapprove-all'() {
+        for (const parts of plans.values()) for (const part of parts) if (part.id) part.approved = false;
+        renderReview(); status('已取消全部采用，变体仍保留，可以重新选择。');
+    },
     profiles() { refreshProfiles(); },
     close() { panel.closest('dialog')?.close(); },
     current() {

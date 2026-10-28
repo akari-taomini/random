@@ -34,6 +34,22 @@ await page.waitForFunction(()=>document.querySelector('[data-v="status"]').textC
 assert.equal(calls,3);assert.equal(await page.locator('[data-v="review"] textarea').count(),6);
 const checks=page.locator('[data-v="review"] input[type="checkbox"]');
 assert.equal(await checks.count(),2);assert.equal(await checks.first().isChecked(),false);
+// Bulk adoption validates edited variants and can be undone without deleting them.
+const secondEdit=page.locator('[data-v="review"] textarea').nth(3);
+const originalSecond=await secondEdit.inputValue();
+await secondEdit.fill('{{invalid macro}}');
+await page.locator('[data-a="approve-all"]').click();
+assert.equal(await checks.first().isChecked(),true);
+assert.equal(await checks.nth(1).isChecked(),false);
+assert.match(await page.locator('[data-v="status"]').innerText(),/1 段校验未通过/);
+await page.locator('[data-v="review"] textarea').nth(3).fill(originalSecond);
+await page.locator('[data-a="approve-all"]').click();
+assert.equal(await checks.first().isChecked(),true);
+assert.equal(await checks.nth(1).isChecked(),true);
+await page.locator('[data-a="unapprove-all"]').click();
+assert.equal(await checks.first().isChecked(),false);
+assert.equal(await checks.nth(1).isChecked(),false);
+assert.equal(await page.locator('[data-v="review"] textarea').count(),6);
 await checks.first().check();
 // Editing invalidates approval.
 const edit=page.locator('[data-v="review"] textarea').first();
