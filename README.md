@@ -1,6 +1,8 @@
-# 桃mini · 同义随机宏工坊 v1.0.0
+# 桃mini · 同义随机宏工坊 v1.1.0
 
-一个独立的 SillyTavern 前端扩展。勾选聊天补全预设条目，调用自己的 API 生成同义变体，逐段审核后导出 `{{random::原文::变体一::变体二}}`。只在制作变体时请求 API，正常聊天时由酒馆展开宏。
+一个独立的 SillyTavern 前端扩展。勾选聊天补全预设条目，选择酒馆已保存的 API 连接预设，或单独填写 API 生成同义变体，逐段审核后导出 `{{random::原文::变体一::变体二}}`。只在制作变体时请求 API，正常聊天时由酒馆展开宏。
+
+v1.1.0 新增：选择酒馆 API 连接预设、显示该连接的模型、刷新连接列表，通过酒馆后台请求；无需重复填写密钥，不切换当前聊天连接。
 
 ## 安装
 
@@ -24,17 +26,31 @@ https://github.com/akari-taomini/random.git
 
 ## 使用
 
-1. 选择 OpenAI 兼容或 Gemini 原生格式，填写基础地址、密钥、模型。模型可以手填，也可以拉取列表。
+1. 在“改写来源”选择“酒馆 API 连接预设”，再选择已保存的连接；或者选择“单独填写 · OpenAI 兼容 / Gemini 原生”，填写基础地址、密钥、模型。
 2. 点击“读取当前预设”，或上传导出的酒馆预设 JSON。当前预设读取通过酒馆 `getContext().getPresetManager('openai')` 接口完成；不支持该接口的旧版请上传 JSON。
 3. 勾选条目。名称旁的数字是可改写的段落数。搜索后，“选择可见”只选择当前搜索结果。
 4. 设置新增变体数。默认新增 3 个，加上原文，共 4 个随机选项。若不包含原文，至少新增 2 个。
-5. 生成。每个段落单独请求，串行执行；HTTP 429 或 5xx 自动重试一次。鉴权、地址错误或网络/CORS 错误会停止队列。可以随时停止，已完成的结果保留。
+5. 生成。每个段落单独请求，串行执行；可识别的 HTTP 429 或 5xx 自动重试一次。连接配置、鉴权或网络错误会停止队列。可以随时停止，已完成的结果保留。
 6. 审核每个变体，可直接编辑文本或单段重生成。确认句意后勾选“采用此段”；编辑或重生成会取消该段的采用状态。
 7. 导出新预设，到酒馆聊天补全预设面板导入。没有采用、失败或跳过的段落保留原文。
 
 “生成选中条目”仅处理尚未生成的段落。失败且没有结果的段落也可重新生成；“重试失败段落”只处理所选条目中有错误的段落。已有成功结果需要使用单段“重生成此段”。
 
-## API 地址示例
+## 使用酒馆 API 连接预设
+
+“酒馆 API 连接预设”指酒馆 API 连接面板中的 **Connection Profiles**，用于保存 API 类型、模型、地址、密钥选择和相关生成预设。它与下方“要改写的聊天补全预设”分别选择：可以用连接 B 来改写当前预设 A。
+
+1. 在酒馆“API 连接”面板配置好接口和模型，并保存为一个连接预设。
+2. 工坊的“改写来源”选择“酒馆 API 连接预设”。
+3. 点击“刷新列表”，选择连接名称与模型，直接生成；无需重填地址或密钥。
+
+此模式使用酒馆官方 `getContext().ConnectionManagerRequestService`，沿用该连接的模型、地址、密钥选择、代理配置及接口支持的关联生成参数。支持的聊天补全、文本补全连接由酒馆接口筛选；文本补全可使用连接保存的指令模板。不切换全局连接，不修改聊天，也不附带聊天历史、角色卡、世界书或聊天补全预设的指令正文。发送内容为工坊改写提示词和选中文本，由酒馆执行必要的接口格式化。
+
+此模式经酒馆后台发起请求，不要求上游 API 支持浏览器跨域；仍需保证酒馆服务器能访问接口并具备有效凭据。插件只保存所选连接 ID，不复制密钥。运行中删除所选连接会停止后续请求，不会自动改用其他连接。
+
+如果列表为空，请先保存连接并确认“连接预设”扩展已启用，再刷新。若提示当前酒馆未提供请求接口，需要更新酒馆，或改用单独填写 API；本插件不会通过临时切换全局连接来兼容旧版。
+
+## 单独填写 API：地址示例
 
 | 接口格式 | 基础地址写法 |
 | --- | --- |
@@ -43,9 +59,9 @@ https://github.com/akari-taomini/random.git
 
 插件不会自动添加 `/v1`。如果服务要求 `/api/v1` 等路径，须完整填写。只支持无查询参数的 HTTP(S) 地址，不支持依赖自定义请求头的特殊服务。OpenAI 兼容格式使用 Bearer Key；Gemini 原生使用 `x-goog-api-key` 请求头。模型必须填写接口实际支持的 ID。
 
-请求从酒馆浏览器页面直接发往填写的接口，接口必须允许浏览器跨域（CORS）；HTTPS 酒馆页面访问普通 HTTP API 还可能被浏览器拦截。网络错误不代表提示词失效。服务若不允许浏览器直连，需要自行使用可信的兼容接口。不要关闭浏览器安全机制。
+单独填写模式的请求从酒馆浏览器页面直接发往填写的接口，接口必须允许浏览器跨域（CORS）；HTTPS 酒馆页面访问普通 HTTP API 还可能被浏览器拦截。网络错误不代表提示词失效。服务若不允许浏览器直连，可改用酒馆 API 连接预设模式。
 
-密钥只保存在当前页面内存与密码输入框中，刷新即清空。其余 API 设置和自定义提示词保存到酒馆扩展设置。插件不会读取你的聊天历史、角色卡或酒馆已保存的 API Key；只发送选中段落和改写提示词。请求次数取决于段落数，正常使用会消耗所填接口的额度。
+单独填写的密钥只保存在当前页面内存与密码输入框中，刷新即清空。其余 API 设置和自定义提示词保存到酒馆扩展设置。插件不会读取聊天历史、角色卡或密钥明文；酒馆连接模式由酒馆后台处理凭据。只发送选中段落和改写提示词。请求次数取决于段落数，正常使用会消耗所选接口的额度。
 
 ## 文本保护与已知范围
 
@@ -62,13 +78,13 @@ https://github.com/akari-taomini/random.git
 
 ## 开发与验证
 
-源码为原生 JavaScript ES 模块，无第三方运行依赖。`core.js` 负责规划、校验、API 和导出，`index.js` 负责酒馆接入和界面，`style.css` 负责自适应样式。
+源码为原生 JavaScript ES 模块，无第三方运行依赖。`core.js` 负责规划、校验、独立 API 和导出，`st-api.js` 负责酒馆连接预设适配，`index.js` 负责界面，`style.css` 负责自适应样式。
 
 运行测试：`npm test`。可设置 `PRESET_FIXTURE` 为本地预设路径，额外验证真实预设往返完整性。测试中的 API 均为模拟响应；使用自己的 API 后仍需检查实机连接与输出。
 
-浏览器模拟测试：在开发环境单独安装 Playwright 及 Chromium 后运行 `npm run test:ui`。也可用 `PLAYWRIGHT_MODULE_PATH` 指定 Playwright 模块路径、`BROWSER_EXECUTABLE_PATH` 指定已有 Chromium。此测试模拟酒馆上下文和 API，检查限流重试、变体编辑与采用、预设导出、草稿恢复及手机宽度布局；不等同于真实酒馆部署和付费 API 联调。
+浏览器模拟测试：在开发环境单独安装 Playwright 及 Chromium 后运行 `npm run test:ui`。也可用 `PLAYWRIGHT_MODULE_PATH` 指定 Playwright 模块路径、`BROWSER_EXECUTABLE_PATH` 指定已有 Chromium。此测试模拟酒馆上下文和 API，检查限流重试、变体编辑与采用、预设导出、草稿恢复、连接预设选择、所选连接失效、停止、全局连接保持及手机宽度布局；不等同于真实酒馆部署和付费 API 联调。
 
-开发参考：[酒馆官方扩展文档](https://docs.sillytavern.app/for-contributors/writing-extensions/)、[官方预设管理器源码](https://github.com/SillyTavern/SillyTavern/blob/release/public/scripts/preset-manager.js)、[官方宏解析源码](https://github.com/SillyTavern/SillyTavern/blob/release/public/scripts/macros.js)。
+开发参考：[酒馆官方扩展文档](https://docs.sillytavern.app/for-contributors/writing-extensions/)、[连接预设文档](https://docs.sillytavern.app/usage/core-concepts/connection-profiles/)、[官方连接请求服务源码](https://github.com/SillyTavern/SillyTavern/blob/release/public/scripts/extensions/shared.js)、[官方预设管理器源码](https://github.com/SillyTavern/SillyTavern/blob/release/public/scripts/preset-manager.js)、[官方宏解析源码](https://github.com/SillyTavern/SillyTavern/blob/release/public/scripts/macros.js)。
 
 ## 作者与分享
 

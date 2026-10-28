@@ -1,7 +1,8 @@
 import { DEFAULT_PROMPT, parsePreset, planText, generate, listModels, exportPreset, renderPlan, validateVariants, endpoint } from './core.js';
+import { getProfiles, requireProfile, generateWithProfile } from './st-api.js';
 
 const MODULE = 'taomini_preset_variants';
-const defaults = { provider: 'openai', url: '', model: '', count: 3, includeOriginal: true, prompt: DEFAULT_PROMPT };
+const defaults = { provider: 'st-profile', profileId: '', url: '', model: '', count: 3, includeOriginal: true, prompt: DEFAULT_PROMPT };
 const ctx = () => globalThis.SillyTavern?.getContext?.();
 let preset, presetName = '', plans = new Map(), selected = new Set(), busy = false, controller;
 let activeIndex = -1;
@@ -19,14 +20,15 @@ panel.innerHTML = `
  <div class="tmv-scroll">
  <details class="tmv-card" open><summary>① 改写 API</summary>
   <div class="tmv-grid">
-   <label>接口格式<select data-f="provider"><option value="openai">OpenAI 兼容</option><option value="gemini">Gemini 原生</option></select></label>
+   <label>改写来源<select data-f="provider"><option value="st-profile">酒馆 API 连接预设</option><option value="openai">单独填写 · OpenAI 兼容</option><option value="gemini">单独填写 · Gemini 原生</option></select></label>
    <label>新增变体数（不含原文）<input data-f="count" type="number" min="1" max="8" value="3"></label>
-   <label class="tmv-wide">API 基础地址<input data-f="url" type="url" placeholder="https://你的接口/v1" autocomplete="off"></label>
-   <label class="tmv-wide">API Key<input data-f="key" type="password" placeholder="仅在本次页面内使用，刷新后清空" autocomplete="off"></label>
-   <label class="tmv-wide">模型<div class="tmv-row"><input data-f="model" list="tmv-models" placeholder="填写模型 ID"><button type="button" data-a="models">拉取模型</button></div><datalist id="tmv-models"></datalist></label>
+   <div class="tmv-wide" data-mode="profile"><label>酒馆 API 连接预设<div class="tmv-row"><select data-f="profileId"><option value="">请选择连接预设</option></select><button type="button" data-a="profiles">刷新列表</button></div></label><p data-v="profile-info" class="tmv-note"></p></div>
+   <label class="tmv-wide" data-mode="direct">API 基础地址<input data-f="url" type="url" placeholder="https://你的接口/v1" autocomplete="off"></label>
+   <label class="tmv-wide" data-mode="direct">API Key<input data-f="key" type="password" placeholder="仅在本次页面内使用，刷新后清空" autocomplete="off"></label>
+   <label class="tmv-wide" data-mode="direct">模型<div class="tmv-row"><input data-f="model" list="tmv-models" placeholder="填写模型 ID"><button type="button" data-a="models">拉取模型</button></div><datalist id="tmv-models"></datalist></label>
   </div>
   <label class="tmv-check"><input data-f="includeOriginal" type="checkbox" checked>把原文也放入随机选项</label>
-  <p class="tmv-note">只将选中且适合改写的文本发给此接口。密钥不写入预设或插件设置；接口需支持浏览器跨域请求。</p>
+  <p data-v="api-note" class="tmv-note"></p>
   <details><summary>内置改写提示词 · 可编辑</summary><textarea data-f="prompt" rows="10" spellcheck="false"></textarea><button type="button" data-a="reset-prompt">恢复默认提示词</button></details>
  </details>
  <section class="tmv-card"><h3>② 选择预设条目</h3>
@@ -49,7 +51,7 @@ panel.innerHTML = `
   <div class="tmv-row tmv-wrap"><button type="button" data-a="export" class="tmv-primary">导出已审核预设</button><button type="button" data-a="draft">保存审核草稿</button><button type="button" data-a="load-draft">恢复草稿</button><input type="file" data-f="draftfile" accept=".json,application/json" hidden></div>
   <p class="tmv-note">导出为新 JSON；到酒馆预设面板导入即可。草稿包含原预设和生成进度，方便下次接着审核。</p>
  </section>
- <footer class="tmv-note">桃mini & GPT · v1.0.0 · 欢迎标注作者后二改与分享，非商业使用。</footer>
+ <footer class="tmv-note">桃mini & GPT · v1.1.0 · 欢迎标注作者后二改与分享，非商业使用。</footer>
  </div>`;
 
 const q = s => panel.querySelector(s);
@@ -65,7 +67,42 @@ function config() {
     const count = Number(f('count').value);
     if (!Number.isInteger(count) || count < 1 || count > 8) throw new Error('新增变体数应为 1～8 的整数。');
     if (!f('includeOriginal').checked && count < 2) throw new Error('不包含原文时，至少需要两个新增变体。');
-    return { provider: f('provider').value, url: f('url').value.trim(), model: f('model').value.trim(), key: f('key').value.trim(), count, includeOriginal: f('includeOriginal').checked, prompt: f('prompt').value };
+    return { provider: f('provider').value, profileId: f('profileId').value, url: f('url').value.trim(), model: f('model').value.trim(), key: f('key').value.trim(), count, includeOriginal: f('includeOriginal').checked, prompt: f('prompt').value };
+}
+
+let profiles = [];
+// Retain a deleted/missing selection visibly; never silently choose a different API.
+function refreshProfiles() {
+    const previous = f('profileId').value || settings.profileId;
+    f('profileId').replaceChildren();
+    const empty = el('option', '', '请选择连接预设'); empty.value = ''; f('profileId').append(empty);
+    try {
+        profiles = getProfiles(ctx());
+        for (const profile of profiles) {
+            const option = el('option', '', `${profile.name} · ${profile.model}`); option.value = profile.id; f('profileId').append(option);
+        }
+        if (previous && !profiles.some(p => p.id === previous)) {
+            const missing = el('option', '', '先前选择已不可用，请重新选择'); missing.value = previous; f('profileId').append(missing);
+        }
+        f('profileId').value = previous || '';
+        showProfileInfo();
+    } catch (error) { profiles = []; v('profile-info').textContent = error.message; }
+}
+
+function showProfileInfo() {
+    const profile = profiles.find(p => p.id === f('profileId').value);
+    v('profile-info').textContent = profile
+        ? `模型：${profile.model} · API：${profile.api}。使用此连接保存的地址、密钥和生成设置。`
+        : profiles.length ? '请选择一个有效的连接预设。这里的连接预设与下方要改写的聊天补全预设是两个不同的选择。'
+            : '没有可用的连接预设。请先在酒馆“API 连接 → 连接预设”中保存一个连接，再刷新列表。';
+}
+
+function showApiMode() {
+    const useProfile = f('provider').value === 'st-profile';
+    panel.querySelectorAll('[data-mode]').forEach(node => { node.hidden = useProfile ? node.dataset.mode !== 'profile' : node.dataset.mode !== 'direct'; });
+    v('api-note').textContent = useProfile
+        ? '经酒馆后台使用所选连接，无需重填密钥；不切换当前聊天连接。只发送改写提示词和选中的文本。'
+        : '只将选中且适合改写的文本发给此接口。密钥不写入预设或插件设置；接口需支持浏览器跨域请求。';
 }
 
 function saveSettings() {
@@ -73,6 +110,7 @@ function saveSettings() {
     if (!current?.extensionSettings) return;
     const conf = config();
     delete conf.key;
+    settings.profileId = conf.profileId;
     current.extensionSettings[MODULE] = conf;
     current.saveSettingsDebounced?.();
 }
@@ -201,7 +239,12 @@ const wait = (ms, signal) => new Promise((resolve, reject) => {
 async function run(jobs) {
     if (busy) return;
     let conf;
-    try { conf = config(); if (!conf.url || !conf.model) throw new Error('先填写 API 地址和模型。'); endpoint(conf); saveSettings(); }
+    try {
+        conf = config();
+        if (conf.provider === 'st-profile') conf.sourceLabel = requireProfile(ctx(), conf.profileId).name;
+        else { if (!conf.url || !conf.model) throw new Error('先填写 API 地址和模型。'); endpoint(conf); }
+        saveSettings();
+    }
     catch (error) { status(error.message, true); return; }
     if (!jobs.length) { status('没有待处理的段落。'); return; }
     // Config is captured once: changing UI cannot alter a running job.
@@ -211,13 +254,16 @@ async function run(jobs) {
     try {
         for (const { part, index } of jobs) {
             if (controller.signal.aborted) break;
-            status(`正在生成 ${done + 1}/${jobs.length} · ${preset.prompts[index].name ?? '条目'} · 每段最多请求两次`);
+            status(`正在生成 ${done + 1}/${jobs.length} · ${preset.prompts[index].name ?? '条目'}${conf.sourceLabel ? ' · 连接：' + conf.sourceLabel : ''} · 每段最多请求两次`);
             part.approved = false;
             let result;
             for (let attempt = 0; attempt < 2; attempt++) {
                 try {
                     attempts++;
-                    result = await generate(conf, [{ id: part.id, text: part.original }], conf.count, controller.signal);
+                    const units = [{ id: part.id, text: part.original }];
+                    result = conf.provider === 'st-profile'
+                        ? await generateWithProfile(conf, units, conf.count, controller.signal, ctx())
+                        : await generate(conf, units, conf.count, controller.signal);
                     break;
                 } catch (error) {
                     if (controller.signal.aborted) throw error;
@@ -237,6 +283,7 @@ async function run(jobs) {
 }
 
 const handlers = {
+    profiles() { refreshProfiles(); },
     close() { panel.closest('dialog')?.close(); },
     current() {
         const manager = ctx()?.getPresetManager?.('openai');
@@ -296,8 +343,11 @@ f('provider').addEventListener('change', () => {
     // Credentials are never silently carried over to a different service format.
     f('key').value = ''; f('url').value = ''; f('model').value = ''; q('#tmv-models').replaceChildren();
     f('url').placeholder = f('provider').value === 'gemini' ? 'https://generativelanguage.googleapis.com/v1beta' : 'https://你的接口/v1';
-    status('已切换接口格式，请填写对应地址、密钥和模型。');
+    showApiMode();
+    if (f('provider').value === 'st-profile') { refreshProfiles(); status('请选择酒馆 API 连接预设，无需重复填写密钥。'); }
+    else status('已切换接口格式，请填写对应地址、密钥和模型。');
 });
+f('profileId').addEventListener('change', showProfileInfo);
 f('url').addEventListener('change', () => { q('#tmv-models').replaceChildren(); });
 for (const key of Object.keys(defaults)) f(key).addEventListener('change', () => { try { saveSettings(); } catch (e) { status(e.message, true); } });
 f('file').addEventListener('change', async () => {
@@ -343,7 +393,8 @@ function init() {
     launch.id = 'tmv-launch'; launch.type = 'button';
     box.append(launch); host.append(box);
     const dialog = el('dialog', 'tmv-dialog'); dialog.append(panel); document.body.append(dialog);
-    launch.addEventListener('click', () => dialog.showModal());
+    launch.addEventListener('click', () => { if (!busy) { refreshProfiles(); showApiMode(); } dialog.showModal(); });
+    refreshProfiles(); showApiMode();
     // Escape hides the panel; an explicit Stop button controls ongoing requests.
     dialog.addEventListener('close', () => { if (busy) globalThis.toastr?.info?.('工坊已收起，生成仍在继续；重新打开可查看或停止。'); });
 }

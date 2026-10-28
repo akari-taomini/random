@@ -11,6 +11,10 @@ const page = await browser.newPage({viewport:{width:1100,height:900},acceptDownl
 const errors=[]; page.on('pageerror',e=>errors.push(e.message));
 await page.goto(`http://127.0.0.1:${server.address().port}/tests/ui-host.html`);
 await page.locator('#tmv-launch').click();
+assert.equal(await page.locator('[data-f="provider"]').inputValue(),'st-profile');
+assert.equal(await page.locator('[data-f="profileId"] option').count(),3);
+assert.equal(await page.locator('[data-f="url"]').isVisible(),false);
+await page.locator('[data-f="provider"]').selectOption('openai');
 await page.locator('[data-a="current"]').click();
 assert.match(await page.locator('[data-v="source"]').innerText(),/2 个条目/);
 await page.locator('[data-a="all"]').click();
@@ -49,6 +53,37 @@ await page.locator('[data-a="current"]').click();
 await page.locator('[data-f="draftfile"]').setInputFiles({name:'draft.json',mimeType:'application/json',buffer:Buffer.from(JSON.stringify(draft))});
 await page.waitForFunction(()=>document.querySelector('[data-v="status"]').textContent.includes('草稿已恢复'));
 assert.equal(await page.locator('[data-v="review"] input[type="checkbox"]').first().isChecked(),true);
+// Saved profiles route through ST's service and do not change the active chat API.
+await page.locator('[data-f="provider"]').selectOption('st-profile');
+await page.locator('[data-f="profileId"]').selectOption('api-b');
+assert.match(await page.locator('[data-v="profile-info"]').innerText(),/model-b/);
+await page.locator('[data-a="current"]').click();
+await page.locator('[data-a="all"]').click();
+await page.locator('[data-a="generate"]').click();
+await page.waitForFunction(()=>document.querySelector('[data-v="status"]').textContent.startsWith('生成完成'));
+assert.equal(await page.evaluate(()=>tmvMock.calls.length),2);
+assert.deepEqual(await page.evaluate(()=>tmvMock.calls.map(c=>c.id)),['api-b','api-b']);
+assert.equal(await page.evaluate(()=>SillyTavern.getContext().extensionSettings.connectionManager.selectedProfile),'api-a');
+assert.equal(await page.evaluate(()=>SillyTavern.getContext().extensionSettings.taomini_preset_variants.profileId),'api-b');
+assert.equal(await page.evaluate(()=>Object.hasOwn(SillyTavern.getContext().extensionSettings.taomini_preset_variants,'key')),false);
+// A deleted selection stays visible and generation fails before a request is sent.
+await page.evaluate(()=>tmvMock.profiles=tmvMock.profiles.filter(p=>p.id!=='api-b'));
+await page.locator('[data-a="profiles"]').click();
+assert.equal(await page.locator('[data-f="profileId"]').inputValue(),'api-b');
+await page.locator('[data-a="current"]').click();
+await page.locator('[data-a="all"]').click();
+await page.locator('[data-a="generate"]').click();
+assert.match(await page.locator('[data-v="status"]').innerText(),/已被删除/);
+assert.equal(await page.evaluate(()=>tmvMock.calls.length),2);
+// Native request cancellation leaves the queue usable.
+await page.locator('[data-f="profileId"]').selectOption('api-a');
+await page.evaluate(()=>tmvMock.wait=true);
+await page.locator('[data-a="generate"]').click();
+await page.waitForFunction(()=>tmvMock.calls.length===3);
+await page.locator('[data-a="stop"]').click();
+await page.waitForFunction(()=>document.querySelector('[data-v="status"]').textContent.startsWith('已停止，'));
+assert.equal(await page.locator('[data-a="generate"]').isEnabled(),true);
+await page.evaluate(()=>tmvMock.wait=false);
 await page.setViewportSize({width:390,height:844});
 assert.equal(await page.evaluate(()=>document.querySelector('.tmv-dialog').scrollWidth > 390),false);
 await page.locator('.tmv-scroll').evaluate(e=>e.scrollTop=0);
