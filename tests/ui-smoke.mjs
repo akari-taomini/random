@@ -11,14 +11,26 @@ const page = await browser.newPage({viewport:{width:1100,height:900},acceptDownl
 const errors=[]; page.on('pageerror',e=>errors.push(e.message));
 await page.goto(`http://127.0.0.1:${server.address().port}/tests/ui-host.html`);
 await page.locator('#tmv-launch').click();
+// The ordinary-language tutorial is read-only and makes no API calls.
+await page.locator('[data-v="tutorial"] > summary').click();
+assert.match(await page.locator('[data-v="tutorial"]').innerText(),/请使用中文回答问题，并尽量表达得简洁清楚/);
+assert.match(await page.locator('[data-v="tutorial"]').innerText(),/一共就有 4 种说法/);
+assert.match(await page.locator('[data-v="tutorial"]').innerText(),/对话补全预设/);
+assert.equal(await page.evaluate(()=>tmvMock.calls.length),0);
+assert.match(await page.locator('[data-v="source"]').innerText(),/还没有读取预设/);
+await page.locator('[data-v="tutorial"] > summary').click();
+assert.match(await page.locator('[data-v="option-summary"]').innerText(),/共 4 种/);
+assert.equal(await page.locator('[data-f="rpm"]').isVisible(),false);
+await page.locator('[data-v="generation-options"] > summary').click();
 await page.locator('[data-f="rpm"]').fill('0');
+assert.match(await page.locator('[data-v="option-summary"]').innerText(),/未开启请求限速/);
 assert.equal(await page.locator('[data-f="batchSize"]').inputValue(),'5');
 assert.equal(await page.locator('[data-f="provider"]').inputValue(),'st-profile');
 assert.equal(await page.locator('[data-f="profileId"] option').count(),3);
 assert.equal(await page.locator('[data-f="url"]').isVisible(),false);
 await page.locator('[data-f="provider"]').selectOption('openai');
 await page.locator('[data-a="current"]').click();
-assert.match(await page.locator('[data-v="source"]').innerText(),/2 个条目/);
+assert.match(await page.locator('[data-v="source"]').innerText(),/2 条提示词/);
 assert.match(await page.locator('[data-v="source"]').innerText(),/含未保存修改/);
 await page.evaluate(()=>{
  tmvMock.currentSettings.prompts[0].content=tmvMock.currentSettings.prompts[0].content.replace('Keep the meaning of every original sentence.','Keep the meaning of every original sentence, including unsaved changes.');
@@ -27,7 +39,7 @@ await page.evaluate(()=>{
 await page.locator('[data-a="current"]').click();
 await page.locator('[data-a="all"]').click();
 assert.match(await page.locator('[data-v="review"] .tmv-original').first().innerText(),/including unsaved changes/);
-assert.match(await page.locator('[data-v="selection"]').innerText(),/2 个可改写段落/);
+assert.match(await page.locator('[data-v="selection"]').innerText(),/2 段可改写文字/);
 await page.locator('[data-f="url"]').fill('https://api.example.test/v1');
 await page.locator('[data-f="key"]').fill('test-key');
 await page.locator('[data-f="model"]').fill('test-model');
@@ -80,7 +92,7 @@ const pendingDraft=page.waitForEvent('download');await page.locator('[data-a="dr
 const draft=JSON.parse(await readFile(await draftDownload.path(),'utf8'));assert.ok(!JSON.stringify(draft).includes('test-key'));
 await page.locator('[data-a="current"]').click();
 await page.locator('[data-f="draftfile"]').setInputFiles({name:'draft.json',mimeType:'application/json',buffer:Buffer.from(JSON.stringify(draft))});
-await page.waitForFunction(()=>document.querySelector('[data-v="status"]').textContent.includes('草稿已恢复'));
+await page.waitForFunction(()=>document.querySelector('[data-v="status"]').textContent.includes('进度已恢复'));
 assert.equal(await page.locator('[data-v="review"] input[type="checkbox"]').first().isChecked(),true);
 // Saved profiles route through ST's service and do not change the active chat API.
 await page.locator('[data-f="provider"]').selectOption('st-profile');
@@ -141,12 +153,15 @@ assert.equal(await page.evaluate(()=>tmvMock.calls.length),4);
 await page.locator('[data-f="rpm"]').fill('0');
 await page.setViewportSize({width:390,height:844});
 assert.equal(await page.evaluate(()=>document.querySelector('.tmv-dialog').scrollWidth > 390),false);
+await page.locator('[data-v="tutorial"] > summary').click();
+assert.equal(await page.evaluate(()=>document.querySelector('.tmv-dialog').scrollWidth > 390),false);
+await page.locator('[data-v="tutorial"] > summary').click();
 await page.locator('.tmv-scroll').evaluate(e=>e.scrollTop=0);
 
 // Real uploaded preset is read by UI and keeps all entries.
 if (process.env.PRESET_FIXTURE) {
 await page.locator('[data-f="file"]').setInputFiles(process.env.PRESET_FIXTURE);
-await page.waitForFunction(()=>document.querySelector('[data-v="source"]').textContent.includes('265 个条目'));
+await page.waitForFunction(()=>document.querySelector('[data-v="source"]').textContent.includes('265 条提示词'));
 assert.equal(await page.locator('[data-v="entries"] .tmv-entry').count(),265);
 }
 assert.deepEqual(errors,[]);
